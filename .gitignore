@@ -11,3 +11,18 @@ __pycache__/
 # System
 .DS_Store
 Thumbs.db
+__MACOSX/
+
+# Dataset - too large for git
+HOT/HOT-Annotated/
+
+# Pretrained & downloaded weights
+pretrained/
+*.pth
+
+# Training checkpoints
+ckpt/
+
+# Demo outputs
+demo/test_images/
+HOT-main/result_epoch_*/

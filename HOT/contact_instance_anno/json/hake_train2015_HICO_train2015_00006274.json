@@ -1,0 +1,28 @@
+{
+    "imsize": {
+        "width": 320,
+        "height": 240
+    },
+    "filename": "train2015_HICO_train2015_00006274",
+    "object": [
+        {
+            "id": 0,
+            "semantic_label": "righthand",
+            "semantic_id": 9,
+            "polygon": {
+                "x": [
+                    114.603551,
+                    79.90448,
+                    107.85651,
+                    122.957031
+                ],
+                "y": [
+                    215.007968,
+                    239.426012,
+                    240,
+                    224.32538
+                ]
+            }
+        }
+    ]
+}

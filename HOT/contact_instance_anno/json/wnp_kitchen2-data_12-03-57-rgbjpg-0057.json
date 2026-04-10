@@ -1,0 +1,26 @@
+{
+    "imsize": {
+        "width": 1920,
+        "height": 1080
+    },
+    "filename": "kitchen2-data_12-03-57-rgbjpg-0057",
+    "object": [
+        {
+            "id": 0,
+            "semantic_label": "lefthand",
+            "semantic_id": 6,
+            "polygon": {
+                "x": [
+                    1372.489319,
+                    1361.173648,
+                    1382.188466
+                ],
+                "y": [
+                    485.002828,
+                    500.629232,
+                    494.163134
+                ]
+            }
+        }
+    ]
+}

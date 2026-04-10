@@ -1,0 +1,26 @@
+{
+    "imsize": {
+        "width": 480,
+        "height": 640
+    },
+    "filename": "000000481635",
+    "object": [
+        {
+            "id": 0,
+            "semantic_label": "rightupperarm",
+            "semantic_id": 7,
+            "polygon": {
+                "x": [
+                    141.375156,
+                    138.2647,
+                    138.2647
+                ],
+                "y": [
+                    346.572669,
+                    345.474861,
+                    348.402349
+                ]
+            }
+        }
+    ]
+}
