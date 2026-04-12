@@ -31,7 +31,7 @@ segmentation_module.eval()
 dummy_frame = torch.randn(1, 3, 300, 400).cuda()
 
 # Warmup
-with torch.no_grad():
+with torch.no_grad(): 
     for _ in range(3):
         _ = segmentation_module.encoder(dummy_frame, return_feature_maps=True)
 

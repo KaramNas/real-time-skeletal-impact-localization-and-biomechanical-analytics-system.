@@ -1,0 +1,26 @@
+Branch: hot-contact-live-a1
+Real-Time Human-Object Contact Detection System
+This branch implements a real-time human-object contact detection pipeline built on top of the HOT dataset (CVPR 2023). The system detects and visually marks every surface or object a human touches on screen in real time using a standard webcam, targeting applications in contamination detection, hygiene monitoring, and security surveillance.
+What Was Built
+Three models running in a single pipeline at 33+ FPS:
+
+HOT Model (ResNet50 + C1 decoder) — Segments contact regions on the human body at pixel level, identifying which body parts are touching surfaces. Uses official pretrained weights (epoch 14).
+YOLOv8n — Detects objects in the scene. Contact is only shown where the HOT mask overlaps a detected object bounding box, eliminating false positives from unsupported gestures.
+MediaPipe Pose Landmarker — Tracks 33 body joints and draws a live skeleton overlay. Hand landmarks additionally power a grip heuristic for occluded contact.
+
+Two Contact Detection Modes
+
+TOUCH — HOT pixel-level segmentation confirms skin contact with a visible object surface
+GRIP — Hand landmarks are inside an object bounding box, catching occluded contact (e.g. handle gripping) that pixel-level methods cannot see
+
+Performance
+
+33+ FPS on a single NVIDIA GPU
+YOLO runs every 10 frames, HOT every 3 frames, MediaPipe every frame
+No frame skipping on the display — smooth real-time output
+
+Key Files
+
+live_contact_a1.py — Main pipeline script combining all three models
+HOT/HOT-main/ — HOT model code with single-GPU fixes applied
+pose_landmarker_lite.task — MediaPipe pose model

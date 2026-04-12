@@ -1,0 +1,93 @@
+You are helping me build a real-time human-object contact detection system 
+for a research paper. Here is the full context of where we are:
+
+## Project
+- Name: Real-Time Human-Object Contact Detection (CCTV-style)
+- Goal: Detect and visually mark every surface/object a human touches on 
+  screen in real time
+- Application: Contamination detection, hygiene monitoring, security
+- End goal: Publishable research paper
+- GitHub: https://github.com/KaramNas/real-time-skeletal-impact-localization
+  -and-biomechanical-analytics-system
+- Branch: hot-contact-detection
+
+## Environment
+- OS: Windows 11
+- Python: 3.10.11
+- GPU: 1x NVIDIA CUDA
+- Project root: C:\Users\SmartPc\Desktop\skeletal-impact-localization
+- Virtual env: venv (activate with venv\Scripts\Activate.ps1)
+- OpenCV: 4.13.0
+- MediaPipe: installed and working
+
+## What We Built So Far
+
+### Session 01
+- Downloaded and set up HOT dataset (CVPR 2023 paper)
+- Fixed 4 bugs to get training working on single GPU
+- Trained 10 epochs (poor results — single GPU limitation)
+- Got official pretrained weights epoch_14 from HOT website
+- Got inference working on static images
+- Set up GitHub branch and Obsidian research notes
+
+### Session 02
+- Built live_contact.py at project root
+- Combined HOT contact detection + MediaPipe skeleton on live webcam
+- Running at 22 FPS — real-time confirmed working
+- HOT model benchmark: 10.2ms, 98 FPS encoder only
+
+## Current Issue Being Fixed
+The HOT model detects contact on hands/arms even when nothing is being 
+touched (false positive bias). We started fixing this with confidence 
+thresholding in the run_hot() function:
+
+def run_hot(frame, confidence_threshold=0.7):
+    img_tensor = preprocess_frame(frame)
+    with torch.no_grad():
+        scores, _, _ = segmentation_module.decoder(
+            segmentation_module.encoder(img_tensor, 
+            return_feature_maps=True))
+    probs = torch.softmax(scores, dim=1)
+    max_probs, pred = torch.max(probs, dim=1)
+    pred = pred.squeeze(0).cpu().numpy()
+    max_probs = max_probs.squeeze(0).cpu().numpy()
+    pred[max_probs < confidence_threshold] = 0
+    return pred
+
+The user has NOT yet tested this fix — this is where we start next session.
+
+## Project Roadmap
+- Phase 0: HOT setup + static inference ✅ Done
+- Phase 1: Live webcam + skeleton overlay ✅ Done
+- Phase 2: Fix false positives (confidence threshold) ← START HERE
+- Phase 3: Add YOLO object detection
+- Phase 4: Only show contact where objects exist nearby
+- Phase 5: Persistent contact marking on screen
+- Phase 6: Real-time optimization
+- Phase 7: Research paper writeup
+
+## Key Files
+- live_contact.py — main live detection script (project root)
+- main.py — original MediaPipe skeleton only script
+- HOT/HOT-main/hot/models/models.py — modified forward() method
+- HOT/HOT-main/config/hot-resnet50dilated-c1.yaml — model config
+- Weights: HOT/HOT-main/ckpt/hot-c1/encoder_epoch_14.pth
+           HOT/HOT-main/ckpt/hot-c1/decoder_epoch_14.pth
+
+## Key fixes made to models.py forward():
+def forward(self, feed_dict, *, segSize=None):
+    if isinstance(feed_dict, list):
+        feed_dict = feed_dict[0]
+    feed_dict = {k: v.cuda() if isinstance(v, torch.Tensor) else v
+                 for k, v in feed_dict.items()}
+
+## Notes
+- The model was designed for 4 GPUs, we run on 1 GPU
+- Official weights from https://hot.is.tue.mpg.de/download.php
+- Obsidian vault named R&D for research notes
+- User uses Obsidian for session logging
+- Do NOT suggest pushing .pth files to GitHub (too large)
+- User is building toward a research paper — treat suggestions 
+  accordingly
+- Start each session by asking user to confirm the threshold fix 
+  worked or not before moving forward
