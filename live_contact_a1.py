@@ -19,7 +19,25 @@ from hot.config import cfg
 
 CFG_FILE  = os.path.join(HOT_ROOT, 'config', 'hot-resnet50dilated-c1.yaml')
 CKPT_DIR  = os.path.join(HOT_ROOT, 'ckpt', 'hot-c1')
-THRESHOLD = 0.55
+
+# ── Per-class thresholds (TUNING 4) ──────────────────────────────────────────
+# HOT classes: 0=background, 1-10=body contact regions, 11-17=object regions
+# Lower threshold for hand classes (1,2) = more sensitive
+# Higher for background = stricter
+PER_CLASS_THRESHOLD = {
+    0:  0.65,   # background — strict
+    1:  0.45,   # left hand
+    2:  0.45,   # right hand
+    3:  0.50,   # left arm
+    4:  0.50,   # right arm
+    5:  0.55,   # torso
+    6:  0.55,   # left leg
+    7:  0.55,   # right leg
+    8:  0.50,   # left foot
+    9:  0.50,   # right foot
+    10: 0.55,   # head
+}
+DEFAULT_THRESHOLD = 0.50  # fallback for classes not listed
 
 # ── Load HOT model ───────────────────────────────────────────────────────────
 cfg.merge_from_file(CFG_FILE)
@@ -40,8 +58,8 @@ net_decoder = builder.build_decoder(
 seg_module = SegmentationModule(net_encoder, net_decoder, None)
 seg_module.cuda().eval()
 
-# ── Load YOLO ────────────────────────────────────────────────────────────────
-yolo = YOLO("yolov8n.pt")
+# ── Load YOLO — upgraded to yolov8s (TUNING 1) ───────────────────────────────
+yolo = YOLO("yolov8s.pt")  # auto-downloads ~22MB
 
 # ── Load MediaPipe ───────────────────────────────────────────────────────────
 from mediapipe.tasks import python
@@ -75,10 +93,10 @@ transform = transforms.Compose([
 
 CONTACT_COLOR = np.array([0, 0, 255], dtype=np.uint8)
 
-# ── Stability settings ────────────────────────────────────────────────────────
+# ── Stability + tuning settings ───────────────────────────────────────────────
 YOLO_EVERY     = 10
-HOT_EVERY      = 3
-SMOOTH_BUFFER  = 5
+HOT_EVERY      = 2   # TUNING 2: was 3, now 2 for smoother mask
+SMOOTH_BUFFER  = 7   # TUNING 5: was 5, now 7 for more stability
 PERSIST_FRAMES = 15
 
 # ── Diagnostics settings ──────────────────────────────────────────────────────
@@ -87,6 +105,21 @@ os.makedirs("logs", exist_ok=True)
 LOG_FILE    = f"logs/session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
 # ── Helper functions ──────────────────────────────────────────────────────────
+def apply_per_class_threshold(scores, pred, max_probs):
+    """Apply different thresholds per HOT class (TUNING 4)."""
+    result = pred.copy()
+    for cls_id, threshold in PER_CLASS_THRESHOLD.items():
+        cls_mask = (pred == cls_id)
+        result[cls_mask & (max_probs < threshold)] = 0
+    # Apply default threshold to any class not in dict
+    listed = set(PER_CLASS_THRESHOLD.keys())
+    for cls_id in np.unique(pred):
+        if cls_id not in listed:
+            cls_mask = (pred == cls_id)
+            result[cls_mask & (max_probs < DEFAULT_THRESHOLD)] = 0
+    return result
+
+
 def run_hot(frame):
     h, w        = frame.shape[:2]
     img_pil     = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -101,7 +134,9 @@ def run_hot(frame):
     max_probs, pred = torch.max(probs, dim=1)
     pred            = pred.squeeze(0).cpu().numpy()
     max_probs       = max_probs.squeeze(0).cpu().numpy()
-    pred[max_probs < THRESHOLD] = 0
+
+    # Per-class threshold instead of single global threshold
+    pred = apply_per_class_threshold(scores, pred, max_probs)
 
     pred = cv2.resize(pred.astype(np.uint8), (w, h),
                       interpolation=cv2.INTER_NEAREST)
@@ -152,6 +187,32 @@ def hand_inside_object_box(hand_points, boxes):
     return False
 
 
+def get_dynamic_radius(pose_result, frame_shape):
+    """
+    TUNING 3: Dynamic radius based on shoulder width.
+    Wider shoulders in frame = closer to camera = larger radius.
+    """
+    LEFT_SHOULDER  = 11
+    RIGHT_SHOULDER = 12
+    default_radius = 60
+    h, w           = frame_shape[:2]
+
+    if not pose_result.pose_landmarks:
+        return default_radius
+
+    for pose_landmarks in pose_result.pose_landmarks:
+        all_pts = [(lm.x * w, lm.y * h) for lm in pose_landmarks]
+        if LEFT_SHOULDER < len(all_pts) and RIGHT_SHOULDER < len(all_pts):
+            lx, ly = all_pts[LEFT_SHOULDER]
+            rx, ry = all_pts[RIGHT_SHOULDER]
+            shoulder_width = abs(rx - lx)
+            # Scale radius: shoulder ~200px = radius 60, ~400px = radius 100
+            radius = int(np.clip(shoulder_width * 0.3, 35, 120))
+            return radius
+
+    return default_radius
+
+
 def build_hand_region_mask(hand_points, shape, radius=60):
     mask = np.zeros(shape[:2], dtype=np.uint8)
     for (px, py) in hand_points:
@@ -187,177 +248,193 @@ session_start         = datetime.now()
 
 print("Running — press Q to quit")
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    h, w = frame.shape[:2]
+        h, w = frame.shape[:2]
 
-    # Init cached masks on first frame
-    if last_object_mask is None:
-        last_object_mask  = np.zeros((h, w), dtype=bool)
-        last_contact_mask = np.zeros((h, w), dtype=bool)
-        persisted_mask    = np.zeros((h, w), dtype=bool)
+        # Init cached masks on first frame
+        if last_object_mask is None:
+            last_object_mask  = np.zeros((h, w), dtype=bool)
+            last_contact_mask = np.zeros((h, w), dtype=bool)
+            persisted_mask    = np.zeros((h, w), dtype=bool)
 
-    # 1. YOLO — every YOLO_EVERY frames
-    if frame_ts % YOLO_EVERY == 0:
-        yolo_results      = yolo(frame, verbose=False, conf=0.15)
-        last_object_boxes = get_object_boxes(yolo_results, frame.shape)
-        last_object_mask  = build_object_mask(last_object_boxes, frame.shape)
+        # 1. YOLO — every YOLO_EVERY frames
+        if frame_ts % YOLO_EVERY == 0:
+            yolo_results      = yolo(frame, verbose=False, conf=0.25)
+            last_object_boxes = get_object_boxes(yolo_results, frame.shape)
+            last_object_mask  = build_object_mask(last_object_boxes, frame.shape)
 
-    object_boxes = last_object_boxes
-    object_mask  = last_object_mask
+        object_boxes = last_object_boxes
+        object_mask  = last_object_mask
 
-    # 2. HOT — every HOT_EVERY frames
-    if frame_ts % HOT_EVERY == 0:
-        hot_pred = run_hot(frame)
-        raw_mask = (hot_pred > 0)
+        # 2. HOT — every HOT_EVERY frames
+        if frame_ts % HOT_EVERY == 0:
+            hot_pred = run_hot(frame)
+            raw_mask = (hot_pred > 0)
 
-        hot_mask_buffer.append(raw_mask.astype(np.uint8))
-        if len(hot_mask_buffer) >= 3:
-            stacked       = np.stack(list(hot_mask_buffer), axis=0)
-            smoothed_mask = (stacked.sum(axis=0) >= (len(hot_mask_buffer) // 2 + 1))
+            hot_mask_buffer.append(raw_mask.astype(np.uint8))
+            if len(hot_mask_buffer) >= 3:
+                stacked       = np.stack(list(hot_mask_buffer), axis=0)
+                smoothed_mask = (stacked.sum(axis=0) >= (len(hot_mask_buffer) // 2 + 1))
+            else:
+                smoothed_mask = raw_mask
+
+            last_contact_mask = smoothed_mask
+
+        contact_mask = last_contact_mask
+
+        # 3. MediaPipe — every frame
+        rgb         = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_img      = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        pose_result = landmarker.detect_for_video(mp_img, frame_ts)
+
+        # 4. COMBINE — pixel touch + grip heuristic
+        pixel_contact = contact_mask & object_mask
+
+        hand_pts      = get_hand_landmarks(pose_result, frame.shape)
+        dynamic_radius = get_dynamic_radius(pose_result, frame.shape)
+        hand_region   = build_hand_region_mask(hand_pts, frame.shape,
+                                               radius=dynamic_radius)
+        hand_in_box   = hand_inside_object_box(hand_pts, object_boxes)
+
+        grip_contact = np.zeros((h, w), dtype=bool)
+        if hand_in_box:
+            grip_contact = hand_region & object_mask
+
+        current_contact = pixel_contact | grip_contact
+
+        # 5. Persistence
+        if current_contact.any():
+            frames_since_contact = 0
+            persisted_mask       = current_contact.copy()
         else:
-            smoothed_mask = raw_mask
+            frames_since_contact += 1
 
-        last_contact_mask = smoothed_mask
+        if frames_since_contact <= PERSIST_FRAMES:
+            valid_contact = persisted_mask
+            is_persisting = frames_since_contact > 0
+        else:
+            valid_contact = current_contact
+            is_persisting = False
 
-    contact_mask = last_contact_mask
+        # 6. Overlay — fade out persisted contact
+        overlay = frame.copy()
+        if valid_contact.any():
+            alpha = 0.6
+            if is_persisting:
+                alpha = 0.6 * (1 - frames_since_contact / PERSIST_FRAMES)
+            overlay[valid_contact] = (
+                overlay[valid_contact] * (1 - alpha) +
+                CONTACT_COLOR * alpha
+            ).astype(np.uint8)
 
-    # 3. MediaPipe — every frame
-    rgb         = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_img      = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    pose_result = landmarker.detect_for_video(mp_img, frame_ts)
+        # Draw object boxes with class label
+        for r in (yolo_results if frame_ts % YOLO_EVERY == 0
+                  else [type('R', (), {'boxes': []})()]):
+            pass
+        for (x1, y1, x2, y2) in object_boxes:
+            cv2.rectangle(overlay, (x1,y1), (x2,y2), (0,255,0), 2)
 
-    # 4. COMBINE — pixel touch + grip heuristic
-    pixel_contact = contact_mask & object_mask
+        # 7. Skeleton
+        if pose_result.pose_landmarks:
+            for pose_landmarks in pose_result.pose_landmarks:
+                points = []
+                for lm in pose_landmarks:
+                    x = int(lm.x * frame.shape[1])
+                    y = int(lm.y * frame.shape[0])
+                    points.append((x, y))
+                    cv2.circle(overlay, (x, y), 4, (0,255,0), -1)
+                for (s, e) in POSE_CONNECTIONS:
+                    if s < len(points) and e < len(points):
+                        cv2.line(overlay, points[s], points[e], (0,255,255), 2)
 
-    hand_pts    = get_hand_landmarks(pose_result, frame.shape)
-    hand_region = build_hand_region_mask(hand_pts, frame.shape, radius=60)
-    hand_in_box = hand_inside_object_box(hand_pts, object_boxes)
+        # 8. FPS + HUD
+        curr_time = cv2.getTickCount()
+        fps       = cv2.getTickFrequency() / (curr_time - prev_time)
+        prev_time = curr_time
 
-    grip_contact = np.zeros((h, w), dtype=bool)
-    if hand_in_box:
-        grip_contact = hand_region & object_mask
+        contact_type = ("PERSIST" if is_persisting      else
+                        "GRIP"    if grip_contact.any()  else
+                        "TOUCH"   if pixel_contact.any() else "NO")
 
-    current_contact = pixel_contact | grip_contact
+        cv2.putText(overlay,
+            f"Objects: {len(object_boxes)}  Contact: {contact_type}  FPS: {fps:.1f}",
+            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
 
-    # 5. Persistence
-    if current_contact.any():
-        frames_since_contact = 0
-        persisted_mask       = current_contact.copy()
-    else:
-        frames_since_contact += 1
+        # Show dynamic radius on HUD for tuning visibility
+        cv2.putText(overlay,
+            f"Radius: {dynamic_radius}px  Threshold: per-class  YOLO: s",
+            (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
 
-    if frames_since_contact <= PERSIST_FRAMES:
-        valid_contact = persisted_mask
-        is_persisting = frames_since_contact > 0
-    else:
-        valid_contact = current_contact
-        is_persisting = False
+        # 9. Diagnostics
+        total_frames   += 1
+        contact_active  = valid_contact.any()
 
-    # 6. Overlay — fade out persisted contact
-    overlay = frame.copy()
-    if valid_contact.any():
-        alpha = 0.6
-        if is_persisting:
-            alpha = 0.6 * (1 - frames_since_contact / PERSIST_FRAMES)
-        overlay[valid_contact] = (
-            overlay[valid_contact] * (1 - alpha) +
-            CONTACT_COLOR * alpha
-        ).astype(np.uint8)
+        if contact_active:
+            contact_frames += 1
 
-    # Draw object boxes
-    for (x1, y1, x2, y2) in object_boxes:
-        cv2.rectangle(overlay, (x1,y1), (x2,y2), (0,255,0), 2)
+        if contact_active != contact_state_prev:
+            contact_flicker_count += 1
+        contact_state_prev = contact_active
 
-    # 7. Skeleton
-    if pose_result.pose_landmarks:
-        for pose_landmarks in pose_result.pose_landmarks:
-            points = []
-            for lm in pose_landmarks:
-                x = int(lm.x * frame.shape[1])
-                y = int(lm.y * frame.shape[0])
-                points.append((x, y))
-                cv2.circle(overlay, (x, y), 4, (0,255,0), -1)
-            for (s, e) in POSE_CONNECTIONS:
-                if s < len(points) and e < len(points):
-                    cv2.line(overlay, points[s], points[e], (0,255,255), 2)
+        if contact_active and len(object_boxes) == 0:
+            false_positive_frames += 1
 
-    # 8. FPS + HUD
-    curr_time = cv2.getTickCount()
-    fps       = cv2.getTickFrequency() / (curr_time - prev_time)
-    prev_time = curr_time
+        if LOG_ENABLED:
+            log_rows.append({
+                "frame":           frame_ts,
+                "timestamp":       datetime.now().strftime('%H:%M:%S.%f')[:-3],
+                "fps":             round(fps, 1),
+                "objects":         len(object_boxes),
+                "contact_type":    contact_type,
+                "contact_active":  int(contact_active),
+                "is_persisting":   int(is_persisting),
+                "flickers_so_far": contact_flicker_count,
+                "dynamic_radius":  dynamic_radius,
+            })
 
-    contact_type = ("PERSIST" if is_persisting    else
-                    "GRIP"    if grip_contact.any()   else
-                    "TOUCH"   if pixel_contact.any()  else "NO")
+        # Write log every 300 frames
+        if LOG_ENABLED and frame_ts % 300 == 0 and frame_ts > 0:
+            with open(LOG_FILE, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=log_rows[0].keys())
+                writer.writeheader()
+                writer.writerows(log_rows)
 
-    cv2.putText(overlay,
-        f"Objects: {len(object_boxes)}  Contact: {contact_type}  FPS: {fps:.1f}",
-        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
+        cv2.imshow("HOT + YOLO Contact Detection", overlay)
+        frame_ts += 1
 
-    # 9. Diagnostics tracking
-    total_frames   += 1
-    contact_active  = valid_contact.any()
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-    if contact_active:
-        contact_frames += 1
+except KeyboardInterrupt:
+    print("\nInterrupted — saving log...")
 
-    if contact_active != contact_state_prev:
-        contact_flicker_count += 1
-    contact_state_prev = contact_active
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
 
-    if contact_active and len(object_boxes) == 0:
-        false_positive_frames += 1
-
-    if LOG_ENABLED:
-        log_rows.append({
-            "frame":            frame_ts,
-            "timestamp":        datetime.now().strftime('%H:%M:%S.%f')[:-3],
-            "fps":              round(fps, 1),
-            "objects":          len(object_boxes),
-            "contact_type":     contact_type,
-            "contact_active":   int(contact_active),
-            "is_persisting":    int(is_persisting),
-            "flickers_so_far":  contact_flicker_count,
-        })
-
-    # Write log every 300 frames (~10 seconds)
-    if LOG_ENABLED and frame_ts % 300 == 0 and frame_ts > 0:
+    # Write final log
+    if LOG_ENABLED and log_rows:
         with open(LOG_FILE, 'w', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=log_rows[0].keys())
             writer.writeheader()
             writer.writerows(log_rows)
+        print(f"Session log saved to {LOG_FILE}")
 
-    cv2.imshow("HOT + YOLO Contact Detection", overlay)
-    frame_ts += 1
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-cv2.destroyAllWindows()
-
-# ── Write final log ───────────────────────────────────────────────────────────
-if LOG_ENABLED and log_rows:
-    with open(LOG_FILE, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=log_rows[0].keys())
-        writer.writeheader()
-        writer.writerows(log_rows)
-    print(f"Session log saved to {LOG_FILE}")
-
-# ── Print session summary ─────────────────────────────────────────────────────
-duration = (datetime.now() - session_start).seconds
-print("\n═══════════════════════════════════════")
-print("         SESSION DIAGNOSTICS REPORT    ")
-print("═══════════════════════════════════════")
-print(f"  Duration:            {duration}s")
-print(f"  Total frames:        {total_frames}")
-print(f"  Contact frames:      {contact_frames} ({100*contact_frames//max(total_frames,1)}%)")
-print(f"  Contact flickers:    {contact_flicker_count}")
-print(f"  Flicker rate:        {round(contact_flicker_count/max(duration,1), 2)}/sec")
-print(f"  False pos frames:    {false_positive_frames}")
-print(f"  Log saved to:        {LOG_FILE}")
-print("═══════════════════════════════════════\n")
+    # Session summary
+    duration = (datetime.now() - session_start).seconds
+    print("\n═══════════════════════════════════════")
+    print("         SESSION DIAGNOSTICS REPORT    ")
+    print("═══════════════════════════════════════")
+    print(f"  Duration:            {duration}s")
+    print(f"  Total frames:        {total_frames}")
+    print(f"  Contact frames:      {contact_frames} ({100*contact_frames//max(total_frames,1)}%)")
+    print(f"  Contact flickers:    {contact_flicker_count}")
+    print(f"  Flicker rate:        {round(contact_flicker_count/max(duration,1), 2)}/sec")
+    print(f"  False pos frames:    {false_positive_frames}")
+    print(f"  Log saved to:        {LOG_FILE}")
+    print("═══════════════════════════════════════\n")
